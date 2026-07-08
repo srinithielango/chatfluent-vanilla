@@ -66,9 +66,10 @@ function render(user, profile, categories) {
           <p class="name font-display">${displayName}</p>
         </div>
       </div>
-      <div class="badge-row">
+      <div class="badge-row" style="align-items:center;">
         <span class="badge">🔥 <span class="val">${profile.streak}</span><span class="unit">day${profile.streak === 1 ? "" : "s"}</span></span>
         <span class="badge">⭐ <span class="val">${profile.xp}</span><span class="unit">XP</span></span>
+        <button id="logout-btn" class="btn btn-outline" style="padding:8px 16px; font-size:13px;">Log out</button>
       </div>
     </div>
 
@@ -82,6 +83,8 @@ function render(user, profile, categories) {
       </div>
     </section>
   `;
+
+  document.getElementById("logout-btn").addEventListener("click", signOut);
 }
 
 init();

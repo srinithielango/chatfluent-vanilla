@@ -61,3 +61,9 @@ async function requireAuthAndProfile() {
   const profile = await loadProfile(session.user);
   return { user: session.user, profile: profile };
 }
+
+// Call this from a logout button anywhere in the app.
+async function signOut() {
+  await db.auth.signOut();
+  window.location.href = "index.html";
+}
