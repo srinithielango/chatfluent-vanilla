@@ -31,19 +31,34 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
 // Category id -> { display name, how many levels, questions per level }
 const CATEGORIES = {
-  greetings: { name: "Greetings", levels: 5, questionsPerLevel: 12 },
-  shopping: { name: "Shopping", levels: 5, questionsPerLevel: 12 },
-  travel: { name: "Travel", levels: 5, questionsPerLevel: 12 },
-  "daily-conversation": { name: "Daily Conversation", levels: 5, questionsPerLevel: 12 },
+  greetings: { name: "Greetings", levels: 12, questionsPerLevel: 12 },
+  shopping: { name: "Shopping", levels: 12, questionsPerLevel: 12 },
+  travel: { name: "Travel", levels: 12, questionsPerLevel: 12 },
+  "daily-conversation": { name: "Daily Conversation", levels: 12, questionsPerLevel: 12 },
 };
 
+function difficultyBandFor(levelNumber) {
+  if (levelNumber <= 3) {
+    return "CEFR A1 (absolute beginner). Very short, common everyday sentences. Simple present tense mostly.";
+  }
+  if (levelNumber <= 6) {
+    return "CEFR A2 (elementary). Slightly longer sentences, some past tense, common phrasal verbs.";
+  }
+  if (levelNumber <= 9) {
+    return "CEFR B1 (intermediate). Natural conversational sentences, idioms, polite requests, some nuance between the wrong options (make the incorrect ones more plausible, not obviously silly).";
+  }
+  return "CEFR B1+/B2 (upper intermediate). Longer, more natural exchanges, indirect phrasing, subtle tone (e.g. sarcasm, hedging, small talk), and wrong options that are believable but subtly off in tone or context.";
+}
+
 async function generateQuestionsForLevel(categoryName, levelNumber, count) {
-  const prompt = `Generate ${count} beginner English conversation Q&A items for the category "${categoryName}", level ${levelNumber} (increase difficulty slightly for higher levels).
+  const band = difficultyBandFor(levelNumber);
+  const prompt = `Generate ${count} English conversation Q&A items for the category "${categoryName}", level ${levelNumber} of 12.
+Difficulty for this level: ${band}
 Return ONLY a valid JSON array, no markdown fences, no commentary. Each item shaped exactly as:
 {"questionText": "...", "options": ["natural correct reply", "plausible-sounding but wrong reply", "silly/unrelated wrong reply"], "correctAnswer": "the exact string of the correct option"}
 Rules:
 - Exactly one of the 3 options must be the natural, correct reply and must match "correctAnswer" exactly.
-- Keep language simple (CEFR A1-A2).
+- Match the difficulty band above — later levels should clearly feel harder than earlier ones in the same category, not just re-worded.
 - questionText should be a single chat message an English speaker might send (e.g. "How are you?", "Can I try this on?").
 - Vary sentence structure across items, don't repeat the same question twice.`;
 
