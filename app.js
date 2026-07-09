@@ -195,6 +195,10 @@ const routes = {
   "level-failed": renderLevelFailed,
   challenge: renderChallenge,
   "play-challenge": renderPlayChallenge,
+  "fill-blank": renderFillBlankLevels,
+  "play-fill-blank": renderPlayFillBlank,
+  "sentence-correction": renderCorrectionLevels,
+  "play-sentence-correction": renderPlayCorrection,
 };
 
 function route() {
@@ -349,6 +353,24 @@ async function renderDashboard() {
           <div style="min-width:0; flex:1;">
             <h3>Conversation Build Challenge</h3>
             <p>Greetings, Shopping, Travel &amp; Daily Conversation</p>
+          </div>
+          <span class="category-arrow">→</span>
+        </a>
+
+        <a class="category-card" href="#/fill-blank">
+          <span class="category-icon" style="background:#FFF3E4; color:#F5A623;">✏️</span>
+          <div style="min-width:0; flex:1;">
+            <h3>Fill in the Blank</h3>
+            <p>Pick the word that completes the sentence</p>
+          </div>
+          <span class="category-arrow">→</span>
+        </a>
+
+        <a class="category-card" href="#/sentence-correction">
+          <span class="category-icon" style="background:#FDE9E5; color:var(--coral-600);">🛠️</span>
+          <div style="min-width:0; flex:1;">
+            <h3>Sentence Correction</h3>
+            <p>Spot the grammatically correct sentence</p>
           </div>
           <span class="category-arrow">→</span>
         </a>
@@ -1074,6 +1096,27 @@ function challengeRenderQuestion() {
   });
 }
 
+// Normalizes for loose matching: lowercase, trim, drop trailing
+// punctuation, collapse extra whitespace.
+function challengeNormalize(str) {
+  return (str || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[.,!?]+$/g, "")
+    .replace(/\s+/g, " ");
+}
+
+// Checks the student's answer against the stored correct answer and any
+// extra accepted variations (question.accepted_answers, a jsonb array —
+// optional column, see scripts/new-challenges-schema.sql). Returns true
+// only on a confident local match, so most correct answers never need
+// to call the AI at all.
+function challengeLocalMatch(studentAnswer, question) {
+  const normalizedStudent = challengeNormalize(studentAnswer);
+  const candidates = [question.correct_answer_en].concat(question.accepted_answers || []);
+  return candidates.some((c) => challengeNormalize(c) === normalizedStudent);
+}
+
 async function challengeHandleSubmit() {
   if (challengeState.busy) return;
   const input = document.getElementById("answer-input");
@@ -1091,30 +1134,46 @@ async function challengeHandleSubmit() {
   const question = challengeState.questions[challengeState.index];
 
   let result;
-  try {
-    const res = await fetch("/api/check-challenge-answer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tamilSentence: question.tamil_sentence,
-        correctAnswer: question.correct_answer_en,
-        studentAnswer,
-      }),
-    });
-    result = await res.json();
-    if (result.error) throw new Error(result.error);
-  } catch (err) {
-    challengeRenderShell(`
-      <p style="color: var(--coral-600);">Could not check your answer right now.</p>
-      <p style="font-size:13px; color: rgba(28,37,33,0.5);">${escapeHtml(err.message || "")}</p>
-      <p style="font-size:13px; color: rgba(28,37,33,0.5); margin-top:8px;">
-        (This feature needs the app to be deployed with the API route + GROQ_API_KEY set —
-        it won't work from a plain static file server.)
-      </p>
-      <button class="btn btn-outline btn-block" style="margin-top:16px;" onclick="challengeRenderQuestion()">Try again</button>
-    `);
-    challengeState.busy = false;
-    return;
+
+  // Fast path: exact/near-exact match against stored answers — no AI
+  // call needed at all. This is what most correct submissions hit.
+  if (challengeLocalMatch(studentAnswer, question)) {
+    result = {
+      correct: true,
+      correctSentence: question.correct_answer_en,
+      grammarExplanation: "Matches the expected answer.",
+      vocabularyExplanation: "",
+      marks: 10,
+    };
+  } else {
+    // Only call the AI when the local check can't confirm it — this is
+    // the one place that still costs an API call, and only for
+    // answers that need real grammar feedback.
+    try {
+      const res = await fetch("/api/check-challenge-answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tamilSentence: question.tamil_sentence,
+          correctAnswer: question.correct_answer_en,
+          studentAnswer,
+        }),
+      });
+      result = await res.json();
+      if (result.error) throw new Error(result.error);
+    } catch (err) {
+      challengeRenderShell(`
+        <p style="color: var(--coral-600);">Could not check your answer right now.</p>
+        <p style="font-size:13px; color: rgba(28,37,33,0.5);">${escapeHtml(err.message || "")}</p>
+        <p style="font-size:13px; color: rgba(28,37,33,0.5); margin-top:8px;">
+          (This feature needs the app to be deployed with the API route + GROQ_API_KEY set —
+          it won't work from a plain static file server.)
+        </p>
+        <button class="btn btn-outline btn-block" style="margin-top:16px;" onclick="challengeRenderQuestion()">Try again</button>
+      `);
+      challengeState.busy = false;
+      return;
+    }
   }
 
   await challengeRecordAttempt(question, studentAnswer, result);
@@ -1189,4 +1248,493 @@ async function challengeGoToNext() {
     challengeState.index += 1;
     challengeRenderQuestion();
   }
+}
+
+/* =========================================================================
+   FILL IN THE BLANK
+   Same interaction pattern as the regular "play" view (pick one of 3
+   options, instant correct/wrong highlight) — no AI calls, no hearts.
+   Content lives in blank_levels / blank_questions (see
+   scripts/new-challenges-schema.sql).
+   ========================================================================= */
+async function renderFillBlankLevels() {
+  appRoot.className = "container narrow";
+  appRoot.innerHTML = `<div class="loading-state">Loading levels…</div>`;
+
+  const result = await requireAuthAndProfile();
+  if (!result) return;
+  const { user } = result;
+
+  const { data: levels } = await db
+    .from("blank_levels")
+    .select("*")
+    .order("level_number", { ascending: true });
+
+  const { data: progress } = await db
+    .from("blank_progress")
+    .select("level_id, completed, score")
+    .eq("user_id", user.id);
+
+  const progressMap = new Map((progress || []).map((p) => [p.level_id, p]));
+  const allLevels = levels || [];
+
+  const nodesHtml = allLevels
+    .map((level, i) => {
+      const prog = progressMap.get(level.id);
+      const isCompleted = prog && prog.completed;
+      const prevCompleted =
+        i === 0 || (progressMap.get(allLevels[i - 1].id) && progressMap.get(allLevels[i - 1].id).completed);
+      const status = isCompleted ? "completed" : prevCompleted ? "unlocked" : "locked";
+
+      let inner = level.level_number;
+      let tag = "a";
+      let href = `href="#/play-fill-blank?levelId=${encodeURIComponent(level.id)}"`;
+      if (status === "locked") {
+        inner = "🔒";
+        tag = "div";
+        href = "";
+      } else if (status === "completed") {
+        inner = "✓";
+      }
+
+      const scoreLabel = prog ? ` · ${prog.score}/3` : "";
+
+      return `
+        <li style="display:flex; flex-direction:column; align-items:center; gap:8px; list-style:none;">
+          <${tag} class="level-node ${status}" ${href}>${inner}</${tag}>
+          <span class="level-label">${level.title || ""}${scoreLabel}</span>
+        </li>`;
+    })
+    .join("");
+
+  const completedCount = allLevels.filter((l) => {
+    const p = progressMap.get(l.id);
+    return p && p.completed;
+  }).length;
+
+  appRoot.innerHTML = `
+    <a class="back-link" href="#/dashboard">← Dashboard</a>
+    <div class="topbar" style="margin-top:16px;">
+      <div class="user-block">
+        <span class="category-icon" style="background:#FFF3E4; width:48px; height:48px;">✏️</span>
+        <div>
+          <h1 class="font-display" style="font-size:1.6rem; margin:0;">Fill in the Blank</h1>
+          <p style="font-size:14px; color: rgba(28,37,33,0.5); margin:2px 0 0;">
+            ${completedCount}/${allLevels.length} levels complete
+          </p>
+        </div>
+      </div>
+    </div>
+
+    ${
+      allLevels.length > 0
+        ? `<ol class="level-map">${nodesHtml}</ol>`
+        : `<p style="text-align:center; margin-top:40px; color: rgba(28,37,33,0.5); font-size:14px;">
+             No levels yet — run scripts/new-challenges-schema.sql first.
+           </p>`
+    }
+  `;
+}
+
+let blankState = null;
+
+async function renderPlayFillBlank(params) {
+  appRoot.className = "container narrow";
+  appRoot.style.minHeight = "100vh";
+  appRoot.style.display = "flex";
+  appRoot.style.flexDirection = "column";
+  appRoot.innerHTML = `<div class="loading-state">Loading level…</div>`;
+
+  const result = await requireAuthAndProfile();
+  if (!result) return;
+
+  blankState = { user: result.user, level: null, questions: [], index: 0, correctCount: 0, busy: false };
+
+  const levelId = params.get("levelId");
+  if (!levelId) {
+    navigate("fill-blank");
+    return;
+  }
+
+  const { data: level } = await db.from("blank_levels").select("*").eq("id", levelId).single();
+  if (!level) {
+    appRoot.innerHTML = "<p>Level not found.</p>";
+    return;
+  }
+  blankState.level = level;
+
+  if (level.level_number > 1) {
+    const { data: prevLevel } = await db
+      .from("blank_levels")
+      .select("id")
+      .eq("level_number", level.level_number - 1)
+      .single();
+
+    if (prevLevel) {
+      const { data: prevProgress } = await db
+        .from("blank_progress")
+        .select("completed")
+        .eq("user_id", blankState.user.id)
+        .eq("level_id", prevLevel.id)
+        .single();
+
+      if (!prevProgress || !prevProgress.completed) {
+        navigate("fill-blank");
+        return;
+      }
+    }
+  }
+
+  const { data: questions } = await db
+    .from("blank_questions")
+    .select("*")
+    .eq("level_id", level.id)
+    .order("sort_order", { ascending: true });
+
+  blankState.questions = questions || [];
+  blankRenderShell();
+  blankRenderQuestion();
+}
+
+function blankRenderShell() {
+  appRoot.innerHTML = `
+    <header class="play-header">
+      <a class="exit-btn" href="#/fill-blank" aria-label="Exit level">✕</a>
+      <div class="progress-bar"><div id="blank-progress-fill" style="width:0%;"></div></div>
+    </header>
+    <div class="question-area" id="blank-question-area"></div>
+    <div class="options" id="blank-options-area"></div>
+  `;
+}
+
+function blankRenderQuestion() {
+  const question = blankState.questions[blankState.index];
+  const pct =
+    blankState.questions.length > 0 ? Math.round((blankState.index / blankState.questions.length) * 100) : 0;
+  document.getElementById("blank-progress-fill").style.width = pct + "%";
+
+  if (!question) {
+    document.getElementById("blank-question-area").innerHTML =
+      '<p style="color: rgba(28,37,33,0.5);">No questions in this level yet.</p>';
+    document.getElementById("blank-options-area").innerHTML = "";
+    return;
+  }
+
+  // Show the sentence with the blank visually marked.
+  const sentenceHtml = escapeHtml(question.sentence_text).replace(
+    "___",
+    '<strong style="border-bottom:2px solid var(--plum-300);">____</strong>'
+  );
+
+  document.getElementById("blank-question-area").innerHTML = `
+    <div class="bubble-row">
+      <div class="bubble theirs">${sentenceHtml}</div>
+    </div>
+  `;
+
+  document.getElementById("blank-options-area").innerHTML = question.options
+    .map((opt) => `<button class="option-btn" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`)
+    .join("");
+
+  document.querySelectorAll("#blank-options-area .option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => blankHandleSelect(btn.dataset.option));
+  });
+}
+
+async function blankFinishLevel() {
+  await db.from("blank_progress").upsert(
+    {
+      user_id: blankState.user.id,
+      level_id: blankState.level.id,
+      completed: true,
+      score: blankState.correctCount,
+      completed_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,level_id" }
+  );
+}
+
+async function blankHandleSelect(option) {
+  if (blankState.busy) return;
+  blankState.busy = true;
+
+  const question = blankState.questions[blankState.index];
+  const isCorrect = option === question.correct_answer;
+
+  document.querySelectorAll("#blank-options-area .option-btn").forEach((btn) => {
+    const isThis = btn.dataset.option === option;
+    const isAnswer = btn.dataset.option === question.correct_answer;
+    btn.disabled = true;
+    if (isAnswer && (isThis || !isCorrect)) btn.classList.add("correct");
+    else if (isThis && !isCorrect) btn.classList.add("wrong");
+    else btn.classList.add("dim");
+  });
+
+  if (isCorrect) {
+    blankState.correctCount += 1;
+    playSound("correct");
+    await awardXpTo(blankState.user.id, 10);
+  } else {
+    playSound("wrong");
+  }
+
+  setTimeout(async () => {
+    const isLast = blankState.index === blankState.questions.length - 1;
+    if (isLast) {
+      playSound("complete");
+      await blankFinishLevel();
+      navigate("fill-blank");
+    } else {
+      blankState.index += 1;
+      blankState.busy = false;
+      blankRenderQuestion();
+    }
+  }, 800);
+}
+
+/* =========================================================================
+   SENTENCE CORRECTION
+   Same pattern again: pick the grammatically correct sentence out of 3.
+   Content lives in correction_levels / correction_questions.
+   ========================================================================= */
+async function renderCorrectionLevels() {
+  appRoot.className = "container narrow";
+  appRoot.innerHTML = `<div class="loading-state">Loading levels…</div>`;
+
+  const result = await requireAuthAndProfile();
+  if (!result) return;
+  const { user } = result;
+
+  const { data: levels } = await db
+    .from("correction_levels")
+    .select("*")
+    .order("level_number", { ascending: true });
+
+  const { data: progress } = await db
+    .from("correction_progress")
+    .select("level_id, completed, score")
+    .eq("user_id", user.id);
+
+  const progressMap = new Map((progress || []).map((p) => [p.level_id, p]));
+  const allLevels = levels || [];
+
+  const nodesHtml = allLevels
+    .map((level, i) => {
+      const prog = progressMap.get(level.id);
+      const isCompleted = prog && prog.completed;
+      const prevCompleted =
+        i === 0 || (progressMap.get(allLevels[i - 1].id) && progressMap.get(allLevels[i - 1].id).completed);
+      const status = isCompleted ? "completed" : prevCompleted ? "unlocked" : "locked";
+
+      let inner = level.level_number;
+      let tag = "a";
+      let href = `href="#/play-sentence-correction?levelId=${encodeURIComponent(level.id)}"`;
+      if (status === "locked") {
+        inner = "🔒";
+        tag = "div";
+        href = "";
+      } else if (status === "completed") {
+        inner = "✓";
+      }
+
+      const scoreLabel = prog ? ` · ${prog.score}/2` : "";
+
+      return `
+        <li style="display:flex; flex-direction:column; align-items:center; gap:8px; list-style:none;">
+          <${tag} class="level-node ${status}" ${href}>${inner}</${tag}>
+          <span class="level-label">${level.title || ""}${scoreLabel}</span>
+        </li>`;
+    })
+    .join("");
+
+  const completedCount = allLevels.filter((l) => {
+    const p = progressMap.get(l.id);
+    return p && p.completed;
+  }).length;
+
+  appRoot.innerHTML = `
+    <a class="back-link" href="#/dashboard">← Dashboard</a>
+    <div class="topbar" style="margin-top:16px;">
+      <div class="user-block">
+        <span class="category-icon" style="background:#FDE9E5; width:48px; height:48px;">🛠️</span>
+        <div>
+          <h1 class="font-display" style="font-size:1.6rem; margin:0;">Sentence Correction</h1>
+          <p style="font-size:14px; color: rgba(28,37,33,0.5); margin:2px 0 0;">
+            ${completedCount}/${allLevels.length} levels complete
+          </p>
+        </div>
+      </div>
+    </div>
+
+    ${
+      allLevels.length > 0
+        ? `<ol class="level-map">${nodesHtml}</ol>`
+        : `<p style="text-align:center; margin-top:40px; color: rgba(28,37,33,0.5); font-size:14px;">
+             No levels yet — run scripts/new-challenges-schema.sql first.
+           </p>`
+    }
+  `;
+}
+
+let correctionState = null;
+
+async function renderPlayCorrection(params) {
+  appRoot.className = "container narrow";
+  appRoot.style.minHeight = "100vh";
+  appRoot.style.display = "flex";
+  appRoot.style.flexDirection = "column";
+  appRoot.innerHTML = `<div class="loading-state">Loading level…</div>`;
+
+  const result = await requireAuthAndProfile();
+  if (!result) return;
+
+  correctionState = { user: result.user, level: null, questions: [], index: 0, correctCount: 0, busy: false };
+
+  const levelId = params.get("levelId");
+  if (!levelId) {
+    navigate("sentence-correction");
+    return;
+  }
+
+  const { data: level } = await db.from("correction_levels").select("*").eq("id", levelId).single();
+  if (!level) {
+    appRoot.innerHTML = "<p>Level not found.</p>";
+    return;
+  }
+  correctionState.level = level;
+
+  if (level.level_number > 1) {
+    const { data: prevLevel } = await db
+      .from("correction_levels")
+      .select("id")
+      .eq("level_number", level.level_number - 1)
+      .single();
+
+    if (prevLevel) {
+      const { data: prevProgress } = await db
+        .from("correction_progress")
+        .select("completed")
+        .eq("user_id", correctionState.user.id)
+        .eq("level_id", prevLevel.id)
+        .single();
+
+      if (!prevProgress || !prevProgress.completed) {
+        navigate("sentence-correction");
+        return;
+      }
+    }
+  }
+
+  const { data: questions } = await db
+    .from("correction_questions")
+    .select("*")
+    .eq("level_id", level.id)
+    .order("sort_order", { ascending: true });
+
+  correctionState.questions = questions || [];
+  correctionRenderShell();
+  correctionRenderQuestion();
+}
+
+function correctionRenderShell() {
+  appRoot.innerHTML = `
+    <header class="play-header">
+      <a class="exit-btn" href="#/sentence-correction" aria-label="Exit level">✕</a>
+      <div class="progress-bar"><div id="correction-progress-fill" style="width:0%;"></div></div>
+    </header>
+    <div class="question-area" id="correction-question-area"></div>
+    <div class="options" id="correction-options-area"></div>
+  `;
+}
+
+function correctionRenderQuestion() {
+  const question = correctionState.questions[correctionState.index];
+  const pct =
+    correctionState.questions.length > 0
+      ? Math.round((correctionState.index / correctionState.questions.length) * 100)
+      : 0;
+  document.getElementById("correction-progress-fill").style.width = pct + "%";
+
+  if (!question) {
+    document.getElementById("correction-question-area").innerHTML =
+      '<p style="color: rgba(28,37,33,0.5);">No questions in this level yet.</p>';
+    document.getElementById("correction-options-area").innerHTML = "";
+    return;
+  }
+
+  document.getElementById("correction-question-area").innerHTML = `
+    <div class="bubble-row">
+      <div class="bubble theirs">${escapeHtml(question.incorrect_sentence)}</div>
+    </div>
+    <p style="font-size:13px; color: rgba(28,37,33,0.5); margin: 4px 0 0;">Which one is correct?</p>
+  `;
+
+  document.getElementById("correction-options-area").innerHTML = question.options
+    .map((opt) => `<button class="option-btn" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`)
+    .join("");
+
+  document.querySelectorAll("#correction-options-area .option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => correctionHandleSelect(btn.dataset.option));
+  });
+}
+
+async function correctionFinishLevel() {
+  await db.from("correction_progress").upsert(
+    {
+      user_id: correctionState.user.id,
+      level_id: correctionState.level.id,
+      completed: true,
+      score: correctionState.correctCount,
+      completed_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,level_id" }
+  );
+}
+
+async function correctionHandleSelect(option) {
+  if (correctionState.busy) return;
+  correctionState.busy = true;
+
+  const question = correctionState.questions[correctionState.index];
+  const isCorrect = option === question.correct_answer;
+
+  document.querySelectorAll("#correction-options-area .option-btn").forEach((btn) => {
+    const isThis = btn.dataset.option === option;
+    const isAnswer = btn.dataset.option === question.correct_answer;
+    btn.disabled = true;
+    if (isAnswer && (isThis || !isCorrect)) btn.classList.add("correct");
+    else if (isThis && !isCorrect) btn.classList.add("wrong");
+    else btn.classList.add("dim");
+  });
+
+  if (isCorrect) {
+    correctionState.correctCount += 1;
+    playSound("correct");
+    await awardXpTo(correctionState.user.id, 10);
+  } else {
+    playSound("wrong");
+  }
+
+  setTimeout(async () => {
+    const isLast = correctionState.index === correctionState.questions.length - 1;
+    if (isLast) {
+      playSound("complete");
+      await correctionFinishLevel();
+      navigate("sentence-correction");
+    } else {
+      correctionState.index += 1;
+      correctionState.busy = false;
+      correctionRenderQuestion();
+    }
+  }, 800);
+}
+
+/* ---------------------------------------------------------------------
+   Shared XP helper used by the new modes above (kept separate from
+   play.js's original playAwardXp so the existing game is untouched).
+--------------------------------------------------------------------- */
+async function awardXpTo(userId, amount) {
+  const { data } = await db.from("profiles").select("xp").eq("id", userId).single();
+  const currentXp = data ? data.xp : 0;
+  await db.from("profiles").update({ xp: currentXp + amount }).eq("id", userId);
 }
