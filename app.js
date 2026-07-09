@@ -188,6 +188,7 @@ function navigate(view, paramsObj) {
 const routes = {
   landing: renderLanding,
   dashboard: renderDashboard,
+  "conversation-categories": renderConversationCategories,
   category: renderCategory,
   play: renderPlay,
   "level-complete": renderLevelComplete,
@@ -310,7 +311,76 @@ async function renderDashboard() {
 
   const result = await requireAuthAndProfile();
   if (!result) return;
-  const { user, profile } = result;
+  const { profile } = result;
+
+  const displayName = (profile.full_name || "there").split(" ")[0];
+  const avatarHtml = profile.avatar_url
+    ? `<img class="avatar" src="${profile.avatar_url}" alt="" />`
+    : `<span class="avatar-fallback">${displayName[0].toUpperCase()}</span>`;
+
+  // Dashboard now only shows two top-level modes. "Conversation Build
+  // Challenge" opens a sub-page listing the 4 topic categories
+  // (Greetings/Shopping/Travel/Daily Conversation); "Tamil -> English
+  // Challenge" goes straight to its own level map, same as before.
+  appRoot.innerHTML = `
+    <div class="topbar">
+      <div class="user-block">
+        ${avatarHtml}
+        <div class="user-meta">
+          <p class="greeting">Welcome back</p>
+          <p class="name font-display">${displayName}</p>
+        </div>
+      </div>
+      <div class="badge-row" style="align-items:center;">
+        <span class="badge">🔥 <span class="val">${profile.streak}</span><span class="unit">day${profile.streak === 1 ? "" : "s"}</span></span>
+        <span class="badge">⭐ <span class="val">${profile.xp}</span><span class="unit">XP</span></span>
+        <button id="logout-btn" class="btn btn-outline" style="padding:8px 16px; font-size:13px;">Log out</button>
+      </div>
+    </div>
+
+    <section style="margin-top:40px;">
+      <h2 class="font-display" style="font-size:1.6rem; margin:0;">What do you want to practice?</h2>
+      <p style="font-size:14px; color: rgba(28,37,33,0.5); margin-top:4px;">
+        Pick a mode to get started.
+      </p>
+      <div class="category-grid" style="margin-top:24px;">
+        <a class="category-card" href="#/conversation-categories">
+          <span class="category-icon" style="background:var(--mint-50); color:var(--mint-600);">🗨️</span>
+          <div style="min-width:0; flex:1;">
+            <h3>Conversation Build Challenge</h3>
+            <p>Greetings, Shopping, Travel &amp; Daily Conversation</p>
+          </div>
+          <span class="category-arrow">→</span>
+        </a>
+
+        <a class="category-card" href="#/challenge">
+          <span class="category-icon" style="background:var(--plum-50); color:var(--plum-600);">🇮🇳</span>
+          <div style="min-width:0; flex:1;">
+            <h3>Tamil → English Challenge</h3>
+            <p>Type the English translation, AI checks it instantly</p>
+          </div>
+          <span class="category-arrow">→</span>
+        </a>
+      </div>
+    </section>
+  `;
+
+  document.getElementById("logout-btn").addEventListener("click", signOut);
+}
+
+/* ---------------------------------------------------------------------
+   VIEW: conversation-categories
+   The 4 topic categories, now one level deeper than the dashboard.
+   Opened from the "Conversation Build Challenge" card above.
+   (This is the grid that used to live directly on the dashboard.)
+--------------------------------------------------------------------- */
+async function renderConversationCategories() {
+  appRoot.className = "container narrow";
+  appRoot.innerHTML = `<div class="loading-state">Loading categories…</div>`;
+
+  const result = await requireAuthAndProfile();
+  if (!result) return;
+  const { user } = result;
 
   const { data: categories } = await db
     .from("categories")
@@ -333,11 +403,6 @@ async function renderDashboard() {
     return Object.assign({}, cat, { totalLevels: catLevels.length, completedLevels: completed });
   });
 
-  const displayName = (profile.full_name || "there").split(" ")[0];
-  const avatarHtml = profile.avatar_url
-    ? `<img class="avatar" src="${profile.avatar_url}" alt="" />`
-    : `<span class="avatar-fallback">${displayName[0].toUpperCase()}</span>`;
-
   const cardsHtml = categoriesWithProgress
     .map((cat) => {
       const accent = CATEGORY_ACCENTS[cat.id] || { bg: "var(--plum-50)", fg: "var(--plum-600)" };
@@ -356,44 +421,17 @@ async function renderDashboard() {
     .join("");
 
   appRoot.innerHTML = `
-    <div class="topbar">
-      <div class="user-block">
-        ${avatarHtml}
-        <div class="user-meta">
-          <p class="greeting">Welcome back</p>
-          <p class="name font-display">${displayName}</p>
-        </div>
-      </div>
-      <div class="badge-row" style="align-items:center;">
-        <span class="badge">🔥 <span class="val">${profile.streak}</span><span class="unit">day${profile.streak === 1 ? "" : "s"}</span></span>
-        <span class="badge">⭐ <span class="val">${profile.xp}</span><span class="unit">XP</span></span>
-        <button id="logout-btn" class="btn btn-outline" style="padding:8px 16px; font-size:13px;">Log out</button>
-      </div>
-    </div>
-
-    <section style="margin-top:40px;">
-      <h2 class="font-display" style="font-size:1.6rem; margin:0;">What do you want to practice?</h2>
+    <a class="back-link" href="#/dashboard">← Dashboard</a>
+    <section style="margin-top:16px;">
+      <h2 class="font-display" style="font-size:1.6rem; margin:0;">Conversation Build Challenge</h2>
       <p style="font-size:14px; color: rgba(28,37,33,0.5); margin-top:4px;">
         Pick a topic — each one builds up in short, real-life exchanges.
       </p>
-      <div class="category-grid">
+      <div class="category-grid" style="margin-top:24px;">
         ${cardsHtml || "<p>No categories yet — run scripts/generate-questions.js first.</p>"}
       </div>
     </section>
-
-    <section style="margin-top:32px;">
-      <a class="category-card" href="#/challenge">
-        <span class="category-icon" style="background:var(--plum-50); color:var(--plum-600);">🇮🇳</span>
-        <div style="min-width:0; flex:1;">
-          <h3>Tamil → English Challenge</h3>
-          <p>Type the English translation, AI checks it instantly</p>
-        </div>
-        <span class="category-arrow">→</span>
-      </a>
-    </section>
   `;
-
-  document.getElementById("logout-btn").addEventListener("click", signOut);
 }
 
 /* ---------------------------------------------------------------------
@@ -462,7 +500,7 @@ async function renderCategory(params) {
   const completedCount = allLevels.filter((l) => completedLevelIds.has(l.id)).length;
 
   appRoot.innerHTML = `
-    <a class="back-link" href="#/dashboard">← Dashboard</a>
+    <a class="back-link" href="#/conversation-categories">← Categories</a>
     <div class="topbar" style="margin-top:16px;">
       <div class="user-block">
         <span class="category-icon" style="background:var(--plum-50); width:48px; height:48px;">${category.icon || "💬"}</span>
