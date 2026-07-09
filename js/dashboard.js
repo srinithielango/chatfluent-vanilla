@@ -82,6 +82,17 @@ function render(user, profile, categories) {
         ${cardsHtml || "<p>No categories yet — run scripts/generate-questions.js first.</p>"}
       </div>
     </section>
+
+    <section style="margin-top:32px;">
+      <a class="category-card" href="challenge.html">
+        <span class="category-icon" style="background:var(--plum-50); color:var(--plum-600);">🇮🇳</span>
+        <div style="min-width:0; flex:1;">
+          <h3>Tamil → English Challenge</h3>
+          <p>Type the English translation, AI checks it instantly</p>
+        </div>
+        <span class="category-arrow">→</span>
+      </a>
+    </section>
   `;
 
   document.getElementById("logout-btn").addEventListener("click", signOut);

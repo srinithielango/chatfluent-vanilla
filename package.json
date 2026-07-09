@@ -4,7 +4,8 @@
   "private": true,
   "description": "Node is only used here to run the one-time Groq seed script. The website itself (index.html etc.) is plain HTML/CSS/JS and needs no build step.",
   "scripts": {
-    "seed": "node -r dotenv/config scripts/generate-questions.js"
+    "seed": "node -r dotenv/config scripts/generate-questions.js",
+    "seed:challenge": "node -r dotenv/config scripts/seed-challenge-questions.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4"
