@@ -2053,39 +2053,47 @@ async function speechHandleResult(transcript) {
 
   const micBtn = document.getElementById("mic-btn");
   const status = document.getElementById("mic-status");
-  if (micBtn) micBtn.style.display = "none";
 
   if (isGood) {
     speechState.correctCount += 1;
     playSound("correct");
     await awardXpTo(speechState.user.id, 10);
+    if (micBtn) micBtn.style.display = "none";
     if (status) {
       status.innerHTML = `
         <span style="color: var(--mint-600); font-weight:600;">✅ Great pronunciation!</span><br/>
         <span style="font-size:12px;">You said: "${escapeHtml(transcript)}"</span>
       `;
     }
+
+    // Only move forward when the answer was correct.
+    setTimeout(async () => {
+      const isLast = speechState.index === speechState.questions.length - 1;
+      if (isLast) {
+        playSound("complete");
+        await speechFinishLevel();
+        navigate("speech-practice");
+      } else {
+        speechState.index += 1;
+        speechState.busy = false;
+        speechRenderQuestion();
+      }
+    }, 1500);
   } else {
+    // Wrong — stay on the same question, let them try again.
     playSound("wrong");
     if (status) {
       status.innerHTML = `
-        <span style="color: var(--coral-600); font-weight:600;">❌ Not quite — try again next time.</span><br/>
+        <span style="color: var(--coral-600); font-weight:600;">❌ Not quite — try again.</span><br/>
         <span style="font-size:12px;">You said: "${escapeHtml(transcript)}"</span><br/>
         <span style="font-size:12px;">Target: "${escapeHtml(question.sentence_text)}"</span>
       `;
     }
-  }
-
-  setTimeout(async () => {
-    const isLast = speechState.index === speechState.questions.length - 1;
-    if (isLast) {
-      playSound("complete");
-      await speechFinishLevel();
-      navigate("speech-practice");
-    } else {
-      speechState.index += 1;
-      speechState.busy = false;
-      speechRenderQuestion();
+    if (micBtn) {
+      micBtn.textContent = "🎤 Tap to Speak Again";
+      micBtn.disabled = false;
+      micBtn.style.display = "";
     }
-  }, 1800);
+    speechState.busy = false;
+  }
 }
