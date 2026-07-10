@@ -35,6 +35,10 @@ const CATEGORIES = {
   shopping: { name: "Shopping", levels: 12, questionsPerLevel: 12 },
   travel: { name: "Travel", levels: 12, questionsPerLevel: 12 },
   "daily-conversation": { name: "Daily Conversation", levels: 12, questionsPerLevel: 12 },
+  interview: { name: "Interview", levels: 12, questionsPerLevel: 12 },
+  office: { name: "Offi", levels: 12, questionsPerLevel: 12 },
+  college: { name: "clearceCollege", levels: 12, questionsPerLevel: 12 },
+  bank: { name: "Bank", levels: 12, questionsPerLevel: 12 },
 };
 
 function difficultyBandFor(levelNumber) {
