@@ -1850,6 +1850,25 @@ let speechState = null;
 let speechRecognizer = null;
 
 // Word-overlap similarity, 0 to 1. No AI — just local text comparison.
+// Word-level edit distance (like spell-check, but per word instead of
+// per letter). This correctly penalizes a wrong/substituted word,
+// unlike a simple "is this word present anywhere" check.
+function wordEditDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  return dp[a.length][b.length];
+}
+
 function speechSimilarity(said, target) {
   const clean = (s) =>
     s
@@ -1861,16 +1880,8 @@ function speechSimilarity(said, target) {
   const targetWords = clean(target);
   if (targetWords.length === 0) return 0;
 
-  const remaining = [...targetWords];
-  let matches = 0;
-  saidWords.forEach((w) => {
-    const idx = remaining.indexOf(w);
-    if (idx !== -1) {
-      matches++;
-      remaining.splice(idx, 1);
-    }
-  });
-  return matches / targetWords.length;
+  const distance = wordEditDistance(saidWords, targetWords);
+  return Math.max(0, 1 - distance / targetWords.length);
 }
 
 async function renderPlaySpeech(params) {
@@ -2049,7 +2060,7 @@ async function speechHandleResult(transcript) {
 
   const question = speechState.questions[speechState.index];
   const similarity = speechSimilarity(transcript, question.sentence_text);
-  const isGood = similarity >= 0.7;
+  const isGood = similarity >= 0.85;
 
   const micBtn = document.getElementById("mic-btn");
   const status = document.getElementById("mic-status");
