@@ -199,6 +199,8 @@ const routes = {
   "play-fill-blank": renderPlayFillBlank,
   "sentence-correction": renderCorrectionLevels,
   "play-sentence-correction": renderPlayCorrection,
+  "speech-practice": renderSpeechLevels,
+  "play-speech": renderPlaySpeech,
 };
 
 function route() {
@@ -371,6 +373,15 @@ async function renderDashboard() {
           <div style="min-width:0; flex:1;">
             <h3>Sentence Correction</h3>
             <p>Spot the grammatically correct sentence</p>
+          </div>
+          <span class="category-arrow">→</span>
+        </a>
+
+        <a class="category-card" href="#/speech-practice">
+          <span class="category-icon" style="background:var(--mint-50); color:var(--mint-600);">🎤</span>
+          <div style="min-width:0; flex:1;">
+            <h3>Speech Practice</h3>
+            <p>Speak sentences aloud, get instant pronunciation feedback</p>
           </div>
           <span class="category-arrow">→</span>
         </a>
@@ -1737,4 +1748,344 @@ async function awardXpTo(userId, amount) {
   const { data } = await db.from("profiles").select("xp").eq("id", userId).single();
   const currentXp = data ? data.xp : 0;
   await db.from("profiles").update({ xp: currentXp + amount }).eq("id", userId);
+}
+
+/* =========================================================================
+   SPEECH PRACTICE
+   Uses the browser's built-in SpeechRecognition API to transcribe what
+   the user says, then compares it locally to the target sentence.
+   No AI/API call involved — everything happens in the browser.
+   Best supported in Chrome / Edge; other browsers may not support it.
+   ========================================================================= */
+async function renderSpeechLevels() {
+  appRoot.className = "container narrow";
+  appRoot.innerHTML = `<div class="loading-state">Loading levels…</div>`;
+
+  const result = await requireAuthAndProfile();
+  if (!result) return;
+  const { user } = result;
+
+  const { data: levels } = await db
+    .from("speech_levels")
+    .select("*")
+    .order("level_number", { ascending: true });
+
+  const { data: progress } = await db
+    .from("speech_progress")
+    .select("level_id, completed, score")
+    .eq("user_id", user.id);
+
+  const progressMap = new Map((progress || []).map((p) => [p.level_id, p]));
+  const allLevels = levels || [];
+
+  const nodesHtml = allLevels
+    .map((level, i) => {
+      const prog = progressMap.get(level.id);
+      const isCompleted = prog && prog.completed;
+      const prevCompleted =
+        i === 0 || (progressMap.get(allLevels[i - 1].id) && progressMap.get(allLevels[i - 1].id).completed);
+      const status = isCompleted ? "completed" : prevCompleted ? "unlocked" : "locked";
+
+      let inner = level.level_number;
+      let tag = "a";
+      let href = `href="#/play-speech?levelId=${encodeURIComponent(level.id)}"`;
+      if (status === "locked") {
+        inner = "🔒";
+        tag = "div";
+        href = "";
+      } else if (status === "completed") {
+        inner = "✓";
+      }
+
+      const scoreLabel = prog ? ` · ${prog.score}/7` : "";
+
+      return `
+        <li style="display:flex; flex-direction:column; align-items:center; gap:8px; list-style:none;">
+          <${tag} class="level-node ${status}" ${href}>${inner}</${tag}>
+          <span class="level-label">${level.title || ""}${scoreLabel}</span>
+        </li>`;
+    })
+    .join("");
+
+  const completedCount = allLevels.filter((l) => {
+    const p = progressMap.get(l.id);
+    return p && p.completed;
+  }).length;
+
+  const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  appRoot.innerHTML = `
+    <a class="back-link" href="#/dashboard">← Dashboard</a>
+    <div class="topbar" style="margin-top:16px;">
+      <div class="user-block">
+        <span class="category-icon" style="background:var(--mint-50); width:48px; height:48px;">🎤</span>
+        <div>
+          <h1 class="font-display" style="font-size:1.6rem; margin:0;">Speech Practice</h1>
+          <p style="font-size:14px; color: rgba(28,37,33,0.5); margin:2px 0 0;">
+            ${completedCount}/${allLevels.length} levels complete
+          </p>
+        </div>
+      </div>
+    </div>
+
+    ${
+      !speechSupported
+        ? `<p style="text-align:center; margin-top:16px; padding:12px; background:#FFF3E4; border-radius:12px; font-size:13px; color: rgba(28,37,33,0.7);">
+             ⚠️ Your browser doesn't support speech recognition. Please use Chrome or Edge for this feature.
+           </p>`
+        : ""
+    }
+
+    ${
+      allLevels.length > 0
+        ? `<ol class="level-map">${nodesHtml}</ol>`
+        : `<p style="text-align:center; margin-top:40px; color: rgba(28,37,33,0.5); font-size:14px;">
+             No levels yet — run scripts/speech-schema.sql + speech-content.sql first.
+           </p>`
+    }
+  `;
+}
+
+let speechState = null;
+let speechRecognizer = null;
+
+// Word-overlap similarity, 0 to 1. No AI — just local text comparison.
+function speechSimilarity(said, target) {
+  const clean = (s) =>
+    s
+      .toLowerCase()
+      .replace(/[^\w\s]/g, "")
+      .split(/\s+/)
+      .filter(Boolean);
+  const saidWords = clean(said);
+  const targetWords = clean(target);
+  if (targetWords.length === 0) return 0;
+
+  const remaining = [...targetWords];
+  let matches = 0;
+  saidWords.forEach((w) => {
+    const idx = remaining.indexOf(w);
+    if (idx !== -1) {
+      matches++;
+      remaining.splice(idx, 1);
+    }
+  });
+  return matches / targetWords.length;
+}
+
+async function renderPlaySpeech(params) {
+  appRoot.className = "container narrow";
+  appRoot.style.minHeight = "100vh";
+  appRoot.style.display = "flex";
+  appRoot.style.flexDirection = "column";
+  appRoot.innerHTML = `<div class="loading-state">Loading level…</div>`;
+
+  const result = await requireAuthAndProfile();
+  if (!result) return;
+
+  const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionClass) {
+    appRoot.innerHTML = `
+      <p style="text-align:center; margin-top:40px; color: rgba(28,37,33,0.6);">
+        ⚠️ Your browser doesn't support speech recognition.<br />Please try this in Chrome or Edge.
+      </p>
+      <a class="btn btn-outline btn-block" style="margin-top:16px;" href="#/speech-practice">Back to levels</a>
+    `;
+    return;
+  }
+
+  speechState = {
+    user: result.user,
+    level: null,
+    questions: [],
+    index: 0,
+    correctCount: 0,
+    busy: false,
+    listening: false,
+  };
+
+  const levelId = params.get("levelId");
+  if (!levelId) {
+    navigate("speech-practice");
+    return;
+  }
+
+  const { data: level } = await db.from("speech_levels").select("*").eq("id", levelId).single();
+  if (!level) {
+    appRoot.innerHTML = "<p>Level not found.</p>";
+    return;
+  }
+  speechState.level = level;
+
+  if (level.level_number > 1) {
+    const { data: prevLevel } = await db
+      .from("speech_levels")
+      .select("id")
+      .eq("level_number", level.level_number - 1)
+      .single();
+
+    if (prevLevel) {
+      const { data: prevProgress } = await db
+        .from("speech_progress")
+        .select("completed")
+        .eq("user_id", speechState.user.id)
+        .eq("level_id", prevLevel.id)
+        .single();
+
+      if (!prevProgress || !prevProgress.completed) {
+        navigate("speech-practice");
+        return;
+      }
+    }
+  }
+
+  const { data: questions } = await db
+    .from("speech_questions")
+    .select("*")
+    .eq("level_id", level.id)
+    .order("sort_order", { ascending: true });
+
+  speechState.questions = questions || [];
+
+  speechRecognizer = new SpeechRecognitionClass();
+  speechRecognizer.lang = "en-US";
+  speechRecognizer.continuous = false;
+  speechRecognizer.interimResults = false;
+
+  speechRenderQuestion();
+}
+
+function speechRenderShell(bodyHtml) {
+  const pct =
+    speechState.questions.length > 0 ? Math.round((speechState.index / speechState.questions.length) * 100) : 0;
+  appRoot.innerHTML = `
+    <header class="play-header">
+      <a class="exit-btn" href="#/speech-practice" aria-label="Exit level">✕</a>
+      <div class="progress-bar"><div style="width:${pct}%;"></div></div>
+    </header>
+    ${bodyHtml}
+  `;
+}
+
+function speechRenderQuestion() {
+  const question = speechState.questions[speechState.index];
+
+  if (!question) {
+    speechRenderShell('<p style="color: rgba(28,37,33,0.5);">No sentences in this level yet.</p>');
+    return;
+  }
+
+  speechRenderShell(`
+    <div class="bubble-row">
+      <div class="bubble theirs" style="font-size:18px;">${escapeHtml(question.sentence_text)}</div>
+    </div>
+    <p style="font-size:13px; color: rgba(28,37,33,0.5); margin: 4px 0 20px;">
+      Tap the mic and read the sentence out loud.
+    </p>
+    <button id="mic-btn" class="btn btn-primary btn-block" style="font-size:16px;">
+      🎤 Tap to Speak
+    </button>
+    <p id="mic-status" style="text-align:center; font-size:13px; color: rgba(28,37,33,0.5); margin-top:12px; min-height:18px;"></p>
+  `);
+
+  document.getElementById("mic-btn").addEventListener("click", speechStartListening);
+}
+
+function speechStartListening() {
+  if (speechState.busy || speechState.listening) return;
+  speechState.listening = true;
+
+  const micBtn = document.getElementById("mic-btn");
+  const status = document.getElementById("mic-status");
+  micBtn.textContent = "🔴 Listening…";
+  micBtn.disabled = true;
+  status.textContent = "Speak now…";
+
+  speechRecognizer.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    speechHandleResult(transcript);
+  };
+
+  speechRecognizer.onerror = (event) => {
+    speechState.listening = false;
+    micBtn.textContent = "🎤 Tap to Speak";
+    micBtn.disabled = false;
+    status.textContent =
+      event.error === "not-allowed"
+        ? "Microphone permission denied. Please allow mic access and try again."
+        : "Didn't catch that — tap the mic and try again.";
+  };
+
+  speechRecognizer.onend = () => {
+    speechState.listening = false;
+  };
+
+  try {
+    speechRecognizer.start();
+  } catch (err) {
+    status.textContent = "Could not start the microphone. Try again.";
+    micBtn.textContent = "🎤 Tap to Speak";
+    micBtn.disabled = false;
+    speechState.listening = false;
+  }
+}
+
+async function speechFinishLevel() {
+  await db.from("speech_progress").upsert(
+    {
+      user_id: speechState.user.id,
+      level_id: speechState.level.id,
+      completed: true,
+      score: speechState.correctCount,
+      completed_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,level_id" }
+  );
+}
+
+async function speechHandleResult(transcript) {
+  if (speechState.busy) return;
+  speechState.busy = true;
+
+  const question = speechState.questions[speechState.index];
+  const similarity = speechSimilarity(transcript, question.sentence_text);
+  const isGood = similarity >= 0.7;
+
+  const micBtn = document.getElementById("mic-btn");
+  const status = document.getElementById("mic-status");
+  if (micBtn) micBtn.style.display = "none";
+
+  if (isGood) {
+    speechState.correctCount += 1;
+    playSound("correct");
+    await awardXpTo(speechState.user.id, 10);
+    if (status) {
+      status.innerHTML = `
+        <span style="color: var(--mint-600); font-weight:600;">✅ Great pronunciation!</span><br/>
+        <span style="font-size:12px;">You said: "${escapeHtml(transcript)}"</span>
+      `;
+    }
+  } else {
+    playSound("wrong");
+    if (status) {
+      status.innerHTML = `
+        <span style="color: var(--coral-600); font-weight:600;">❌ Not quite — try again next time.</span><br/>
+        <span style="font-size:12px;">You said: "${escapeHtml(transcript)}"</span><br/>
+        <span style="font-size:12px;">Target: "${escapeHtml(question.sentence_text)}"</span>
+      `;
+    }
+  }
+
+  setTimeout(async () => {
+    const isLast = speechState.index === speechState.questions.length - 1;
+    if (isLast) {
+      playSound("complete");
+      await speechFinishLevel();
+      navigate("speech-practice");
+    } else {
+      speechState.index += 1;
+      speechState.busy = false;
+      speechRenderQuestion();
+    }
+  }, 1800);
 }
