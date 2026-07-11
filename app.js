@@ -164,6 +164,17 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Fisher-Yates shuffle — returns a new array, doesn't mutate the input.
+// Used so the correct answer isn't always in the same option position.
+function shuffleArray(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 const appRoot = document.getElementById("app-root");
 
 /* ---------------------------------------------------------------------
@@ -685,7 +696,7 @@ function playRenderQuestion() {
     </div>
   `;
 
-  document.getElementById("options-area").innerHTML = question.options
+  document.getElementById("options-area").innerHTML = shuffleArray(question.options)
     .map((opt) => `<button class="option-btn" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`)
     .join("");
 
@@ -1443,7 +1454,7 @@ function blankRenderQuestion() {
     </div>
   `;
 
-  document.getElementById("blank-options-area").innerHTML = question.options
+  document.getElementById("blank-options-area").innerHTML = shuffleArray(question.options)
     .map((opt) => `<button class="option-btn" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`)
     .join("");
 
@@ -1680,7 +1691,7 @@ function correctionRenderQuestion() {
     <p style="font-size:13px; color: rgba(28,37,33,0.5); margin: 4px 0 0;">Which one is correct?</p>
   `;
 
-  document.getElementById("correction-options-area").innerHTML = question.options
+  document.getElementById("correction-options-area").innerHTML = shuffleArray(question.options)
     .map((opt) => `<button class="option-btn" data-option="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`)
     .join("");
 
