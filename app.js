@@ -62,6 +62,51 @@ function formatCountdown(ms) {
 }
 
 /* ---------------------------------------------------------------------
+   3b. PER-MODE HEARTS
+   Each game "card" (conversation / fill-blank / sentence-correction /
+   speech-practice) has its own independent 3 hearts + 24h cooldown,
+   stored per (user_id, mode) in the mode_hearts table — separate from
+   any other card. See scripts/mode-hearts-schema.sql.
+--------------------------------------------------------------------- */
+async function getModeHeartsRow(userId, mode) {
+  let { data: row } = await db.from("mode_hearts").select("*").eq("user_id", userId).eq("mode", mode).maybeSingle();
+
+  if (!row) {
+    const { data: created } = await db
+      .from("mode_hearts")
+      .insert({ user_id: userId, mode, hearts: MAX_HEARTS })
+      .select("*")
+      .single();
+    row = created || { hearts: MAX_HEARTS, last_heart_lost_at: null };
+  }
+  return row;
+}
+
+// Returns { hearts, needsRefillCommit, msRemaining } for this user+mode,
+// and commits the refill to the DB if the 24h cooldown has passed.
+async function getModeHeartsState(userId, mode) {
+  const row = await getModeHeartsRow(userId, mode);
+  const state = getHeartsState(row.hearts, row.last_heart_lost_at);
+
+  if (state.needsRefillCommit) {
+    await db
+      .from("mode_hearts")
+      .update({ hearts: MAX_HEARTS, last_heart_lost_at: null })
+      .eq("user_id", userId)
+      .eq("mode", mode);
+  }
+  return state;
+}
+
+async function loseModeHeart(userId, mode, currentHearts) {
+  const newHearts = currentHearts - 1;
+  const updates =
+    newHearts <= 0 ? { hearts: 0, last_heart_lost_at: new Date().toISOString() } : { hearts: newHearts };
+  await db.from("mode_hearts").update(updates).eq("user_id", userId).eq("mode", mode);
+  return newHearts;
+}
+
+/* ---------------------------------------------------------------------
    4. STREAK (was js/streak.js)
 --------------------------------------------------------------------- */
 function toDateOnly(dateLike) {
@@ -610,11 +655,12 @@ async function renderPlay(params) {
   }
   playState.level = level;
 
-  if (result.profile.hearts <= 0) {
-    navigate("level-failed", { categoryId: level.category_id });
+  const heartsState = await getModeHeartsState(result.user.id, "conversation");
+  if (heartsState.hearts <= 0) {
+    navigate("level-failed", { mode: "conversation", categoryId: level.category_id });
     return;
   }
-  playState.hearts = result.profile.hearts;
+  playState.hearts = heartsState.hearts;
 
   if (level.level_number > 1) {
     const { data: prevLevel } = await db
@@ -706,12 +752,7 @@ function playRenderQuestion() {
 }
 
 async function playLoseHeart() {
-  playState.hearts -= 1;
-  const updates =
-    playState.hearts <= 0
-      ? { hearts: 0, last_heart_lost_at: new Date().toISOString() }
-      : { hearts: playState.hearts };
-  await db.from("profiles").update(updates).eq("id", playState.user.id);
+  playState.hearts = await loseModeHeart(playState.user.id, "conversation", playState.hearts);
   return playState.hearts;
 }
 
@@ -783,7 +824,7 @@ async function playHandleSelect(option) {
 
     setTimeout(() => {
       if (remaining <= 0) {
-        navigate("level-failed", { categoryId: playState.level.category_id });
+        navigate("level-failed", { mode: "conversation", categoryId: playState.level.category_id });
       } else {
         playState.selected = null;
         playState.status = "answering";
@@ -874,15 +915,14 @@ async function renderLevelFailed(params) {
   const result = await requireAuthAndProfile();
   if (!result) return;
 
+  const mode = params.get("mode") || "conversation";
   const categoryId = params.get("categoryId") || "";
 
-  const { data: profile } = await db
-    .from("profiles")
-    .select("hearts, last_heart_lost_at")
-    .eq("id", result.user.id)
-    .single();
+  const heartsState = await getModeHeartsState(result.user.id, mode);
 
-  const heartsState = getHeartsState(profile ? profile.hearts : 0, profile ? profile.last_heart_lost_at : null);
+  // Where "Keep practicing" sends them back to, per mode.
+  const backHref =
+    mode === "conversation" ? `#/category?id=${encodeURIComponent(categoryId)}` : `#/${mode}`;
 
   const readyBlock = `<div class="num" style="color: var(--mint-600); font-size:1.5rem;">Ready!</div>`;
   const countdownBlock = `
@@ -905,7 +945,7 @@ async function renderLevelFailed(params) {
       <div class="summary-actions">
         ${
           heartsState.hearts > 0
-            ? `<a class="btn btn-primary btn-block" href="#/category?id=${encodeURIComponent(categoryId)}">Keep practicing</a>`
+            ? `<a class="btn btn-primary btn-block" href="${backHref}">Keep practicing</a>`
             : ""
         }
         <a class="btn btn-outline btn-block" href="#/dashboard">Back to dashboard</a>
@@ -1370,13 +1410,20 @@ async function renderPlayFillBlank(params) {
   const result = await requireAuthAndProfile();
   if (!result) return;
 
-  blankState = { user: result.user, level: null, questions: [], index: 0, correctCount: 0, busy: false };
+  blankState = { user: result.user, level: null, questions: [], index: 0, correctCount: 0, hearts: 3, busy: false };
 
   const levelId = params.get("levelId");
   if (!levelId) {
     navigate("fill-blank");
     return;
   }
+
+  const heartsState = await getModeHeartsState(result.user.id, "fill-blank");
+  if (heartsState.hearts <= 0) {
+    navigate("level-failed", { mode: "fill-blank" });
+    return;
+  }
+  blankState.hearts = heartsState.hearts;
 
   const { data: level } = await db.from("blank_levels").select("*").eq("id", levelId).single();
   if (!level) {
@@ -1423,10 +1470,17 @@ function blankRenderShell() {
     <header class="play-header">
       <a class="exit-btn" href="#/fill-blank" aria-label="Exit level">✕</a>
       <div class="progress-bar"><div id="blank-progress-fill" style="width:0%;"></div></div>
+      <div class="hearts" id="blank-hearts-display"></div>
     </header>
     <div class="question-area" id="blank-question-area"></div>
     <div class="options" id="blank-options-area"></div>
   `;
+}
+
+function blankRenderHearts() {
+  const el = document.getElementById("blank-hearts-display");
+  if (!el) return;
+  el.textContent = "❤️".repeat(blankState.hearts) + "🤍".repeat(Math.max(0, 3 - blankState.hearts));
 }
 
 function blankRenderQuestion() {
@@ -1434,6 +1488,7 @@ function blankRenderQuestion() {
   const pct =
     blankState.questions.length > 0 ? Math.round((blankState.index / blankState.questions.length) * 100) : 0;
   document.getElementById("blank-progress-fill").style.width = pct + "%";
+  blankRenderHearts();
 
   if (!question) {
     document.getElementById("blank-question-area").innerHTML =
@@ -1498,9 +1553,15 @@ async function blankHandleSelect(option) {
     await awardXpTo(blankState.user.id, 10);
   } else {
     playSound("wrong");
+    blankState.hearts = await loseModeHeart(blankState.user.id, "fill-blank", blankState.hearts);
+    blankRenderHearts();
   }
 
   setTimeout(async () => {
+    if (blankState.hearts <= 0) {
+      navigate("level-failed", { mode: "fill-blank" });
+      return;
+    }
     const isLast = blankState.index === blankState.questions.length - 1;
     if (isLast) {
       playSound("complete");
@@ -1610,13 +1671,20 @@ async function renderPlayCorrection(params) {
   const result = await requireAuthAndProfile();
   if (!result) return;
 
-  correctionState = { user: result.user, level: null, questions: [], index: 0, correctCount: 0, busy: false };
+  correctionState = { user: result.user, level: null, questions: [], index: 0, correctCount: 0, hearts: 3, busy: false };
 
   const levelId = params.get("levelId");
   if (!levelId) {
     navigate("sentence-correction");
     return;
   }
+
+  const heartsState = await getModeHeartsState(result.user.id, "sentence-correction");
+  if (heartsState.hearts <= 0) {
+    navigate("level-failed", { mode: "sentence-correction" });
+    return;
+  }
+  correctionState.hearts = heartsState.hearts;
 
   const { data: level } = await db.from("correction_levels").select("*").eq("id", levelId).single();
   if (!level) {
@@ -1663,10 +1731,17 @@ function correctionRenderShell() {
     <header class="play-header">
       <a class="exit-btn" href="#/sentence-correction" aria-label="Exit level">✕</a>
       <div class="progress-bar"><div id="correction-progress-fill" style="width:0%;"></div></div>
+      <div class="hearts" id="correction-hearts-display"></div>
     </header>
     <div class="question-area" id="correction-question-area"></div>
     <div class="options" id="correction-options-area"></div>
   `;
+}
+
+function correctionRenderHearts() {
+  const el = document.getElementById("correction-hearts-display");
+  if (!el) return;
+  el.textContent = "❤️".repeat(correctionState.hearts) + "🤍".repeat(Math.max(0, 3 - correctionState.hearts));
 }
 
 function correctionRenderQuestion() {
@@ -1676,6 +1751,7 @@ function correctionRenderQuestion() {
       ? Math.round((correctionState.index / correctionState.questions.length) * 100)
       : 0;
   document.getElementById("correction-progress-fill").style.width = pct + "%";
+  correctionRenderHearts();
 
   if (!question) {
     document.getElementById("correction-question-area").innerHTML =
@@ -1735,9 +1811,15 @@ async function correctionHandleSelect(option) {
     await awardXpTo(correctionState.user.id, 10);
   } else {
     playSound("wrong");
+    correctionState.hearts = await loseModeHeart(correctionState.user.id, "sentence-correction", correctionState.hearts);
+    correctionRenderHearts();
   }
 
   setTimeout(async () => {
+    if (correctionState.hearts <= 0) {
+      navigate("level-failed", { mode: "sentence-correction" });
+      return;
+    }
     const isLast = correctionState.index === correctionState.questions.length - 1;
     if (isLast) {
       playSound("complete");
@@ -1922,6 +2004,7 @@ async function renderPlaySpeech(params) {
     questions: [],
     index: 0,
     correctCount: 0,
+    hearts: 3,
     busy: false,
     listening: false,
   };
@@ -1931,6 +2014,13 @@ async function renderPlaySpeech(params) {
     navigate("speech-practice");
     return;
   }
+
+  const heartsState = await getModeHeartsState(result.user.id, "speech-practice");
+  if (heartsState.hearts <= 0) {
+    navigate("level-failed", { mode: "speech-practice" });
+    return;
+  }
+  speechState.hearts = heartsState.hearts;
 
   const { data: level } = await db.from("speech_levels").select("*").eq("id", levelId).single();
   if (!level) {
@@ -1984,9 +2074,17 @@ function speechRenderShell(bodyHtml) {
     <header class="play-header">
       <a class="exit-btn" href="#/speech-practice" aria-label="Exit level">✕</a>
       <div class="progress-bar"><div style="width:${pct}%;"></div></div>
+      <div class="hearts" id="speech-hearts-display"></div>
     </header>
     ${bodyHtml}
   `;
+  speechRenderHearts();
+}
+
+function speechRenderHearts() {
+  const el = document.getElementById("speech-hearts-display");
+  if (!el) return;
+  el.textContent = "❤️".repeat(speechState.hearts) + "🤍".repeat(Math.max(0, 3 - speechState.hearts));
 }
 
 function speechRenderQuestion() {
@@ -2102,8 +2200,26 @@ async function speechHandleResult(transcript) {
       }
     }, 1500);
   } else {
-    // Wrong — stay on the same question, let them try again.
+    // Wrong — costs a heart. Stay on the same question so they can retry,
+    // unless hearts just ran out.
     playSound("wrong");
+    speechState.hearts = await loseModeHeart(speechState.user.id, "speech-practice", speechState.hearts);
+    speechRenderHearts();
+
+    if (speechState.hearts <= 0) {
+      if (status) {
+        status.innerHTML = `
+          <span style="color: var(--coral-600); font-weight:600;">💔 Out of hearts.</span><br/>
+          <span style="font-size:12px;">You said: "${escapeHtml(transcript)}"</span>
+        `;
+      }
+      if (micBtn) micBtn.style.display = "none";
+      setTimeout(() => {
+        navigate("level-failed", { mode: "speech-practice" });
+      }, 1500);
+      return;
+    }
+
     if (status) {
       status.innerHTML = `
         <span style="color: var(--coral-600); font-weight:600;">❌ Not quite — try again.</span><br/>
